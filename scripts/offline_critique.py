@@ -33,7 +33,61 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+YUNET_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+
+_DETECTOR = {"kind": None, "model": None}
+
+
+def _init_detector():
+    """Pick the best available face detector for this OpenCV build.
+
+    OpenCV 4.x -> Haar cascade (bundled).
+    OpenCV 5.x -> Haar was removed; use YuNet DNN (downloads a ~240 KB model once).
+    """
+    if _DETECTOR["kind"] is not None:
+        return _DETECTOR["kind"]
+    if hasattr(cv2, "CascadeClassifier") and hasattr(cv2, "data"):
+        try:
+            path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            _DETECTOR["model"] = cv2.CascadeClassifier(path)
+            if not _DETECTOR["model"].empty():
+                _DETECTOR["kind"] = "haar"
+                return _DETECTOR["kind"]
+        except Exception:
+            pass
+    try:
+        import tempfile, urllib.request
+        model_path = Path(tempfile.gettempdir()) / "face_detection_yunet_2023mar.onnx"
+        if not model_path.exists() or model_path.stat().st_size < 10000:
+            urllib.request.urlretrieve(YUNET_URL, model_path)
+        _DETECTOR["model"] = cv2.FaceDetectorYN.create(str(model_path), "", (320, 320), score_threshold=0.6)
+        _DETECTOR["kind"] = "yunet"
+    except Exception:
+        _DETECTOR["kind"] = "none"
+    return _DETECTOR["kind"]
+
+
+def detect_face(frame):
+    """Return largest frontal face box (x, y, w, h) or None."""
+    kind = _init_detector()
+    if kind == "haar":
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = _DETECTOR["model"].detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+        if len(faces) == 0:
+            return None
+        return max(faces, key=lambda f: f[2] * f[3])
+    if kind == "yunet":
+        h, w = frame.shape[:2]
+        try:
+            _DETECTOR["model"].setInputSize((w, h))
+            _, faces = _DETECTOR["model"].detect(frame)
+        except Exception:
+            return None
+        if faces is None or len(faces) == 0:
+            return None
+        boxes = [(int(f[0]), int(f[1]), int(f[2]), int(f[3])) for f in faces]
+        return max(boxes, key=lambda b: b[2] * b[3])
+    return None
 
 
 def probe_duration(path: str) -> float:
@@ -63,15 +117,6 @@ def read_frames(video: str, count: int, max_w: int = 960):
             frame = cv2.resize(frame, (max_w, int(h * max_w / w)))
         frames.append((t, frame))
     return frames
-
-
-def detect_face(frame):
-    """Return largest frontal face box (x, y, w, h) or None."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
-    if len(faces) == 0:
-        return None
-    return max(faces, key=lambda f: f[2] * f[3])
 
 
 def mean_abs_diff(a, b):
