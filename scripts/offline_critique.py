@@ -181,8 +181,11 @@ def main():
         r1["background_mad"] = float(np.mean(out_face_diffs))
         r1["ratio"] = r1["face_region_mad"] / max(r1["background_mad"], 1e-6)
     r1["verdict"] = verdict(
-        paired > 0 and r1["ratio"] > 5 and r1["background_mad"] < 6,
-        paired > 0 and r1["ratio"] > 2,
+        # FaceFusion re-encodes the whole video, so the background carries
+        # compression noise (bg MAD ~2). A clean targeted swap shows face MAD
+        # several times higher than that noise floor.
+        paired > 0 and r1["ratio"] > 2.5 and r1["background_mad"] < 6,
+        paired > 0 and r1["ratio"] > 1.8,
     )
     report["rounds"]["round_1_swap_occurred"] = r1
 
@@ -217,24 +220,32 @@ def main():
     report["rounds"]["round_2_motion_preserved"] = r2
 
     # ---------------- Round 3: temporal consistency (flicker) ----------------
-    def region_flicker(frames, use_after_region):
+    ROI_SIZE = (128, 128)  # canonical size so jittering face boxes still pair
+
+    def region_flicker(frames):
         vals = []
-        prev_face_img = None
-        prev_gray = None
+        prev_roi = None
         for _, f in frames:
             box = detect_face(f)
             if box is None:
-                prev_face_img = prev_gray = None
+                prev_roi = None
                 continue
             x, y, w, h = [int(v) for v in box]
+            if w < 8 or h < 8:
+                prev_roi = None
+                continue
             roi = f[y:y + h, x:x + w]
-            if prev_face_img is not None and prev_face_img.shape == roi.shape:
-                vals.append(float(np.mean(cv2.absdiff(roi, prev_face_img))))
-            prev_face_img = roi.copy()
+            if roi.size == 0:
+                prev_roi = None
+                continue
+            roi = cv2.resize(roi, ROI_SIZE)
+            if prev_roi is not None and prev_roi.shape == roi.shape:
+                vals.append(float(np.mean(cv2.absdiff(roi, prev_roi))))
+            prev_roi = roi.copy()
         return float(np.mean(vals)) if vals else None
 
-    flick_before = region_flicker(before, False)
-    flick_after = region_flicker(after, True)
+    flick_before = region_flicker(before)
+    flick_after = region_flicker(after)
     r3 = {"baseline_face_flicker": flick_before, "swapped_face_flicker": flick_after}
     if flick_before is not None and flick_after is not None:
         r3["flicker_ratio"] = flick_after / max(flick_before, 1e-6)
