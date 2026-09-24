@@ -75,8 +75,18 @@ jobs:
 
       - name: Download media & probe
         run: |
-          curl -L --retry 5 --retry-delay 3 -o target.mp4 "${{ inputs.target_video_url }}"
-          curl -L --retry 5 --retry-delay 3 -o source.img "${{ inputs.source_face_url }}"
+          curl -L --retry 5 --retry-delay 3 -o target.bin "${{ inputs.target_video_url }}"
+          curl -L --retry 5 --retry-delay 3 -o source.bin "${{ inputs.source_face_url }}"
+          # FaceFusion validates by extension -> normalize via MIME sniff
+          SMIME=$(file -b --mime-type source.bin)
+          case "$SMIME" in
+            image/png) mv source.bin source.png ;;
+            image/webp) mv source.bin source.webp ;;
+            image/bmp) mv source.bin source.bmp ;;
+            *) mv source.bin source.jpg ;;
+          esac
+          # ffmpeg content-sniffs input, so a fixed .mp4 name is safe for the target
+          mv target.bin target.mp4
           echo "### Input media" >> "$GITHUB_STEP_SUMMARY"
           ffprobe -v error -show_entries format=duration:stream=codec_name,width,height,r_frame_rate -of default=noprint_wrappers=1 target.mp4 | tee -a "$GITHUB_STEP_SUMMARY"
           DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 target.mp4)
@@ -104,7 +114,8 @@ jobs:
             -f segment -segment_time "${{ inputs.chunk_seconds }}" \
             -reset_timestamps 1 \
             chunks/chunk_%03d.mp4
-          cp source.img chunks/source.img
+          cp source.* chunks/
+          if [ ! -f chunks/source.jpg ]; then cp source.* chunks/source.jpg; fi
           ls -la chunks/
 
       - name: Upload chunks
@@ -146,7 +157,11 @@ jobs:
       - name: Stage media at workspace root
         run: |
           mv media/chunk_${{ steps.idx.outputs.padded }}.mp4 target_chunk.mp4
-          cp media/source.img source.img
+          # FaceFusion validates by extension: prefer the correctly-named source,
+          # fall back to the .jpg alias (cv2 decodes by content, not extension)
+          for f in media/source.jpg media/source.png media/source.webp media/source.bmp; do
+            if [ -f "$f" ]; then cp "$f" "$(basename "$f")"; break; fi
+          done
           ls -la
 
       - name: Set up Python 3.12
@@ -190,7 +205,7 @@ jobs:
             --output-video-encoder libx264 \
             --output-video-preset veryfast \
             --output-video-quality 85 \
-            -s ../source.img \
+            -s ../$(ls ../source.jpg ../source.png ../source.webp ../source.bmp 2>/dev/null | head -1 | xargs basename) \
             -t ../target_chunk.mp4 \
             -o ../swapped_chunk_${{ steps.idx.outputs.padded }}.mp4
 
@@ -241,7 +256,12 @@ jobs:
       - name: Build before/after contact sheet & offline critique
         run: |
           curl -L --retry 5 --retry-delay 3 -o target.mp4 "${{ inputs.target_video_url }}"
-          curl -L --retry 5 --retry-delay 3 -o source.img "${{ inputs.source_face_url }}"
+          curl -L --retry 5 --retry-delay 3 -o source.bin "${{ inputs.source_face_url }}"
+          case "$(file -b --mime-type source.bin)" in
+            image/png) mv source.bin source.png ;;
+            image/webp) mv source.bin source.webp ;;
+            *) mv source.bin source.jpg ;;
+          esac
           pip install --quiet pillow numpy opencv-python-headless
           python scripts/make_contact_sheet.py --before target.mp4 --after out/output.mp4 --out contact_sheet.png --frames 6
           python scripts/offline_critique.py --before target.mp4 --after out/output.mp4 \

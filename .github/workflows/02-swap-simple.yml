@@ -103,11 +103,27 @@ jobs:
 
       - name: Download media
         run: |
-          curl -L --retry 5 --retry-delay 3 -o target.mp4  "${{ inputs.target_video_url }}"
-          curl -L --retry 5 --retry-delay 3 -o source.img "${{ inputs.source_face_url }}"
-          file target.mp4 source.img
+          curl -L --retry 5 --retry-delay 3 -o target.bin "${{ inputs.target_video_url }}"
+          curl -L --retry 5 --retry-delay 3 -o source.bin "${{ inputs.source_face_url }}"
+          # FaceFusion validates source/target by file extension -> normalize via MIME sniff
+          TMIME=$(file -b --mime-type target.bin)
+          SMIME=$(file -b --mime-type source.bin)
+          case "$TMIME" in
+            video/webm) mv target.bin target.webm ;;
+            video/quicktime) mv target.bin target.mov ;;
+            *) mv target.bin target.mp4 ;;
+          esac
+          case "$SMIME" in
+            image/png) mv source.bin source.png ;;
+            image/webp) mv source.bin source.webp ;;
+            image/bmp) mv source.bin source.bmp ;;
+            *) mv source.bin source.jpg ;;
+          esac
+          TARGET=$(ls target.* | head -1); echo "TARGET=$TARGET" >> "$GITHUB_ENV"
+          SOURCE=$(ls source.* | head -1); echo "SOURCE=$SOURCE" >> "$GITHUB_ENV"
+          file "$TARGET" "$SOURCE"
           echo "### Input media" >> "$GITHUB_STEP_SUMMARY"
-          ffprobe -v error -show_entries format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate -of default=noprint_wrappers=1 target.mp4 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          ffprobe -v error -show_entries format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate -of default=noprint_wrappers=1 "$TARGET" | tee -a "$GITHUB_STEP_SUMMARY" || true
 
       - name: Run swap (CPU)
         working-directory: facefusion
@@ -130,8 +146,8 @@ jobs:
             --output-video-encoder libx264 \
             --output-video-preset veryfast \
             --output-video-quality "${{ inputs.output_video_quality }}" \
-            -s ../source.img \
-            -t ../target.mp4 \
+            -s "../${{ env.SOURCE }}" \
+            -t "../${{ env.TARGET }}" \
             -o ../output.mp4 \
             ${{ inputs.extra_args }}
 
@@ -139,14 +155,14 @@ jobs:
         run: |
           pip install --quiet pillow
           python scripts/make_contact_sheet.py \
-            --before target.mp4 --after output.mp4 \
+            --before "${{ env.TARGET }}" --after output.mp4 \
             --out contact_sheet.png --frames 6
 
       - name: 4-round offline critique
         run: |
           pip install --quiet numpy opencv-python-headless
           python scripts/offline_critique.py \
-            --before target.mp4 --after output.mp4 \
+            --before "${{ env.TARGET }}" --after output.mp4 \
             --out-md critique_report.md --out-json critique_report.json
           cat critique_report.md >> "$GITHUB_STEP_SUMMARY"
 
@@ -159,7 +175,7 @@ jobs:
         run: |
           pip install --quiet requests
           python scripts/vlm_critique.py \
-            --before target.mp4 --after output.mp4 \
+            --before "${{ env.TARGET }}" --after output.mp4 \
             --out-md vlm_report.md || true
           if [ -f vlm_report.md ]; then cat vlm_report.md >> "$GITHUB_STEP_SUMMARY"; fi
 
