@@ -70,6 +70,9 @@ jobs:
     outputs:
       chunk_list: ${{ steps.plan.outputs.chunk_list }}
     steps:
+      - name: Set up FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
       - name: Download media & probe
         run: |
           curl -L --retry 5 --retry-delay 3 -o target.mp4 "${{ inputs.target_video_url }}"
@@ -124,6 +127,9 @@ jobs:
     steps:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
+
+      - name: Set up FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
 
       - name: Compute chunk index (zero-padded)
         id: idx
@@ -203,6 +209,9 @@ jobs:
     steps:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
+
+      - name: Set up FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
 
       - name: Download all swapped chunks
         uses: actions/download-artifact@v4

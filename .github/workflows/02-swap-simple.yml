@@ -76,6 +76,9 @@ jobs:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
 
+      - name: Set up FFmpeg
+        uses: AnimMouse/setup-ffmpeg@v1
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
