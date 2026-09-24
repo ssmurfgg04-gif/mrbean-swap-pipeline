@@ -72,6 +72,8 @@ jobs:
     name: swap (ubuntu-latest, CPU)
     runs-on: ubuntu-latest
     timeout-minutes: 55
+    env:
+      VLM_API_KEY_SET: ${{ secrets.VLM_API_KEY != '' }}
     steps:
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
@@ -149,7 +151,7 @@ jobs:
           cat critique_report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Optional 4-round VLM critique (needs repo secrets)
-        if: ${{ secrets.VLM_API_KEY != '' }}
+        if: ${{ env.VLM_API_KEY_SET == 'true' }}
         env:
           VLM_API_BASE: ${{ secrets.VLM_API_BASE }}
           VLM_API_KEY: ${{ secrets.VLM_API_KEY }}
