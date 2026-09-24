@@ -63,6 +63,19 @@ on:
         description: "Extra raw CLI args appended to headless-run (optional)"
         required: false
         default: ""
+      consent_confirm:
+        description: "REQUIRED: tick to confirm everyone pictured agreed to this swap"
+        required: true
+        type: boolean
+        default: false
+      subtitles_url:
+        description: "Optional direct URL to .srt subtitles (burned in Swahili/English)"
+        required: false
+        default: ""
+      watermark_text:
+        description: "Baked-in corner label (ethics requirement, empty disables)"
+        required: false
+        default: "AI-GENERATED DEMO"
 
 permissions:
   contents: read
@@ -75,6 +88,13 @@ jobs:
     env:
       VLM_API_KEY_SET: ${{ secrets.VLM_API_KEY != '' }}
     steps:
+      - name: Consent gate (fail fast)
+        run: |
+          if [ "${{ inputs.consent_confirm }}" != "true" ]; then
+            echo "::error::consent_confirm must be ticked — confirm everyone pictured agreed to this swap."
+            exit 1
+          fi
+
       - name: Checkout pipeline repo
         uses: actions/checkout@v4
 
@@ -179,12 +199,21 @@ jobs:
             --out-md vlm_report.md || true
           if [ -f vlm_report.md ]; then cat vlm_report.md >> "$GITHUB_STEP_SUMMARY"; fi
 
+      - name: Finish — subtitles + AI label
+        run: |
+          python scripts/finish_video.py \
+            --inp output.mp4 --out final.mp4 \
+            --srt-url "${{ inputs.subtitles_url }}" \
+            --label "${{ inputs.watermark_text }}"
+          ls -la final.mp4
+
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: swap-output
           path: |
             output.mp4
+            final.mp4
             contact_sheet.png
             critique_report.md
             critique_report.json

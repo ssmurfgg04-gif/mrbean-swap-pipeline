@@ -1,0 +1,3 @@
+# Sema hosted demo (Hugging Face Spaces, free tier)
+# Space SDK: Gradio. System ffmpeg is preinstalled on Spaces.
+gradio>=4.0

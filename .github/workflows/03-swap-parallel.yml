@@ -19,6 +19,19 @@ on:
         description: "Hard cap on parallel chunks (each chunk = 1 runner)"
         required: false
         default: "8"
+      consent_confirm:
+        description: "REQUIRED: tick to confirm everyone pictured agreed to this swap"
+        required: true
+        type: boolean
+        default: false
+      subtitles_url:
+        description: "Optional direct URL to .srt subtitles (burned in Swahili/English)"
+        required: false
+        default: ""
+      watermark_text:
+        description: "Baked-in corner label (ethics requirement, empty disables)"
+        required: false
+        default: "AI-GENERATED DEMO"
       face_selector_order:
         description: "How subjects in the video are ordered/selected"
         required: false
@@ -70,6 +83,13 @@ jobs:
     outputs:
       chunk_list: ${{ steps.plan.outputs.chunk_list }}
     steps:
+      - name: Consent gate (fail fast)
+        run: |
+          if [ "${{ inputs.consent_confirm }}" != "true" ]; then
+            echo "::error::consent_confirm must be ticked — confirm everyone pictured agreed to this swap."
+            exit 1
+          fi
+
       - name: Set up FFmpeg
         uses: AnimMouse/setup-ffmpeg@v1
 
@@ -268,12 +288,21 @@ jobs:
             --out-md critique_report.md --out-json critique_report.json
           cat critique_report.md >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Finish — subtitles + AI label
+        run: |
+          python scripts/finish_video.py \
+            --inp out/output.mp4 --out out/final.mp4 \
+            --srt-url "${{ inputs.subtitles_url }}" \
+            --label "${{ inputs.watermark_text }}"
+          ls -la out/final.mp4
+
       - name: Upload final results
         uses: actions/upload-artifact@v4
         with:
           name: swap-output-parallel
           path: |
             out/output.mp4
+            out/final.mp4
             contact_sheet.png
             critique_report.md
             critique_report.json
