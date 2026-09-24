@@ -91,7 +91,14 @@ This pipeline produces photorealistic media of a person who did not say or do wh
 
 ## Team
 
-Solo-built for Hack for Humanity: Nairobi (AI Collective) — open to collaborators, technical and non-technical. Reach out via GitHub issues.
+Built for Hack for Humanity: Nairobi (AI Collective).
+
+| Member | Role |
+|---|---|
+| **Jack Kimani** ([@ssmurfgg04-gif](https://github.com/ssmurfgg04-gif)) | Builder — pipeline, automation, docs |
+| **Sudi** | Collaborator |
+
+Solo-eligible (1–4 members allowed), open to collaborators — technical and non-technical. Reach out via GitHub issues.
 
 ## Project story
 
