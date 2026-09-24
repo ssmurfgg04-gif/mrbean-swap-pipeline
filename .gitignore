@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+facefusion/
+*.mp4
+*.mov
+*.mkv
+!docs/**/*.mp4
+.jobs/
+assets/samples/*.png

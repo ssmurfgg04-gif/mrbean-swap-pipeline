@@ -1,0 +1,108 @@
+name: "01 · Smoke Test (CPU end-to-end)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      facefusion_ref:
+        description: "FaceFusion git ref to install"
+        required: false
+        default: "master"
+      run_real_swap:
+        description: "Run a real 25-frame swap (true) or install-only check (false)"
+        required: false
+        default: "true"
+        type: choice
+        options: [ "true", "false" ]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke (ubuntu-latest, CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Show runner resources
+        run: |
+          echo "vCPUs: $(nproc)"
+          echo "RAM:   $(free -h | awk '/Mem:/ {print $2}')"
+          echo "Disk:  $(df -h / | awk 'NR==2 {print $4}') free"
+          ffmpeg -version | head -n 1
+
+      - name: Clone FaceFusion (${{ inputs.facefusion_ref }})
+        run: |
+          git clone --depth 1 https://github.com/facefusion/facefusion.git "$GITHUB_WORKSPACE/facefusion" --branch "${{ inputs.facefusion_ref }}" || \
+          git clone --depth 1 https://github.com/facefusion/facefusion.git "$GITHUB_WORKSPACE/facefusion"
+          cd facefusion
+          git log --oneline -1
+
+      - name: Cache FaceFusion models
+        uses: actions/cache@v4
+        with:
+          path: facefusion/.assets/models
+          key: facefusion-models-${{ runner.os }}-${{ inputs.facefusion_ref }}
+
+      - name: Install FaceFusion (CPU onnxruntime)
+        working-directory: facefusion
+        run: python install.py default --skip-conda
+
+      - name: Verify onnxruntime CPU providers
+        run: |
+          python - <<'PY'
+          import onnxruntime as ort
+          print("onnxruntime:", ort.__version__)
+          print("available providers:", ort.get_available_providers())
+          assert "CPUExecutionProvider" in ort.get_available_providers()
+          PY
+
+      - name: Download official sample media (stable GitHub release assets)
+        run: |
+          BASE="https://github.com/facefusion/facefusion-assets/releases/download/examples-3.0.0"
+          curl -L --retry 5 --retry-delay 3 -o source.jpg       "$BASE/source.jpg"
+          curl -L --retry 5 --retry-delay 3 -o target-240p.mp4  "$BASE/target-240p.mp4"
+          ls -la source.jpg target-240p.mp4
+
+      - name: Real 25-frame swap on CPU (exercises full model chain)
+        if: ${{ inputs.run_real_swap == 'true' }}
+        working-directory: facefusion
+        run: |
+          python facefusion.py headless-run \
+            --log-level debug \
+            --processors face_swapper \
+            --face-swapper-model inswapper_128 \
+            --face-swapper-pixel-boost 128x128 \
+            --execution-providers cpu \
+            --execution-thread-count 2 \
+            -s ../source.jpg \
+            -t ../target-240p.mp4 \
+            -o ../smoke-output.mp4 \
+            --trim-frame-end 25
+
+      - name: Summarize result
+        if: ${{ inputs.run_real_swap == 'true' }}
+        run: |
+          ls -la smoke-output.mp4
+          ffprobe -v error -show_entries format=duration,size:stream=codec_name,width,height -of default=noprint_wrappers=1 smoke-output.mp4
+          DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 smoke-output.mp4)
+          if python3 -c "import sys; sys.exit(0 if float('$DUR') > 0 else 1)"; then
+            echo "### ✅ Smoke test passed" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Output video duration: ${DUR}s — detection, swapping and encoding all work on the CPU runner." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload smoke output
+        if: ${{ inputs.run_real_swap == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-output
+          path: smoke-output.mp4
+          retention-days: 30

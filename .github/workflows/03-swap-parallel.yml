@@ -1,0 +1,251 @@
+name: "03 · Parallel Swap (CPU, chunked matrix)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_video_url:
+        description: "Direct URL of the video whose subject gets replaced"
+        required: true
+        default: "https://github.com/facefusion/facefusion-assets/releases/download/examples-3.0.0/target-720p.mp4"
+      source_face_url:
+        description: "Direct URL of the NEW face reference image (jpg/png)"
+        required: true
+        default: "https://github.com/facefusion/facefusion-assets/releases/download/examples-3.0.0/source.jpg"
+      chunk_seconds:
+        description: "Target chunk length in seconds"
+        required: false
+        default: "45"
+      max_chunks:
+        description: "Hard cap on parallel chunks (each chunk = 1 runner)"
+        required: false
+        default: "8"
+      face_selector_order:
+        description: "How subjects in the video are ordered/selected"
+        required: false
+        default: "left-right"
+        type: choice
+        options: [ "left-right", "right-left", "top-bottom", "bottom-top", "small-large", "large-small", "best", "all" ]
+      reference_face_position:
+        description: "0-based index of the subject to replace (1 = second subject)"
+        required: false
+        default: "0"
+      reference_frame_number:
+        description: "Frame number used to lock the reference subject"
+        required: false
+        default: "0"
+      swapper_model:
+        description: "Face swapper model"
+        required: false
+        default: "inswapper_128"
+        type: choice
+        options: [ "inswapper_128", "hyperswap_1a_256", "hyperswap_1b_256", "hyperswap_1c_256", "simswap_unofficial_512", "ghost_3_256", "blendswap_256", "uniface_256" ]
+      pixel_boost:
+        description: "Pixel boost resolution for the swapped face"
+        required: false
+        default: "256x256"
+        type: choice
+        options: [ "128x128", "256x256", "384x384", "512x512", "768x768", "1024x1024" ]
+      use_face_enhancer:
+        description: "Add GFPGAN 1.4 face enhancer post-pass"
+        required: false
+        default: "true"
+        type: choice
+        options: [ "true", "false" ]
+      facefusion_ref:
+        description: "FaceFusion git ref to install"
+        required: false
+        default: "master"
+
+permissions:
+  contents: read
+
+env:
+  FACEFUSION_REF: ${{ inputs.facefusion_ref }}
+
+jobs:
+  prepare:
+    name: prepare · probe & chunk
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      chunk_list: ${{ steps.plan.outputs.chunk_list }}
+    steps:
+      - name: Download media & probe
+        run: |
+          curl -L --retry 5 --retry-delay 3 -o target.mp4 "${{ inputs.target_video_url }}"
+          curl -L --retry 5 --retry-delay 3 -o source.img "${{ inputs.source_face_url }}"
+          echo "### Input media" >> "$GITHUB_STEP_SUMMARY"
+          ffprobe -v error -show_entries format=duration:stream=codec_name,width,height,r_frame_rate -of default=noprint_wrappers=1 target.mp4 | tee -a "$GITHUB_STEP_SUMMARY"
+          DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 target.mp4)
+          echo "duration=$DUR" >> "$GITHUB_ENV"
+
+      - name: Plan chunks
+        id: plan
+        run: |
+          LIST=$(python3 -c "
+          import math
+          dur = float('${{ env.duration }}')
+          cs  = max(5, int('${{ inputs.chunk_seconds }}'))
+          cap = max(1, int('${{ inputs.max_chunks }}'))
+          n = max(1, min(cap, math.ceil(dur / cs)))
+          print('[' + ','.join(str(i) for i in range(n)) + ']')")
+          echo "chunk_list=$LIST" >> "$GITHUB_OUTPUT"
+          echo "Chunk plan: $LIST" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Split into uniform chunks (uniform codec = clean concat later)
+        run: |
+          mkdir -p chunks
+          ffmpeg -y -i target.mp4 \
+            -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p \
+            -c:a aac -b:a 128k \
+            -f segment -segment_time "${{ inputs.chunk_seconds }}" \
+            -reset_timestamps 1 \
+            chunks/chunk_%03d.mp4
+          cp source.img chunks/source.img
+          ls -la chunks/
+
+      - name: Upload chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunks
+          path: chunks/
+          retention-days: 1
+
+  swap:
+    name: swap chunk ${{ matrix.chunk }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        chunk: ${{ fromJSON(needs.prepare.outputs.chunk_list) }}
+    steps:
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v4
+
+      - name: Compute chunk index (zero-padded)
+        id: idx
+        run: |
+          IDX=$(printf '%03d' ${{ matrix.chunk }})
+          echo "padded=$IDX" >> "$GITHUB_OUTPUT"
+
+      - name: Download this chunk
+        uses: actions/download-artifact@v4
+        with:
+          name: chunks
+          path: media/
+
+      - name: Stage media at workspace root
+        run: |
+          mv media/chunk_${{ steps.idx.outputs.padded }}.mp4 target_chunk.mp4
+          cp media/source.img source.img
+          ls -la
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Clone FaceFusion
+        run: |
+          git clone --depth 1 https://github.com/facefusion/facefusion.git "$GITHUB_WORKSPACE/facefusion" --branch "$FACEFUSION_REF" || \
+          git clone --depth 1 https://github.com/facefusion/facefusion.git "$GITHUB_WORKSPACE/facefusion"
+
+      - name: Cache FaceFusion models
+        uses: actions/cache@v4
+        with:
+          path: facefusion/.assets/models
+          key: facefusion-models-${{ runner.os }}-${{ env.FACEFUSION_REF }}
+
+      - name: Install FaceFusion (CPU)
+        working-directory: facefusion
+        run: python install.py default --skip-conda
+
+      - name: Run swap on chunk
+        working-directory: facefusion
+        run: |
+          PROCESSORS="face_swapper"
+          if [ "${{ inputs.use_face_enhancer }}" = "true" ]; then
+            PROCESSORS="face_swapper face_enhancer"
+          fi
+          python facefusion.py headless-run \
+            --log-level info \
+            --processors $PROCESSORS \
+            --face-swapper-model "${{ inputs.swapper_model }}" \
+            --face-swapper-pixel-boost "${{ inputs.pixel_boost }}" \
+            --face-mask-types box occlusion \
+            --face-selector-order "${{ inputs.face_selector_order }}" \
+            --reference-face-position "${{ inputs.reference_face_position }}" \
+            --reference-frame-number "${{ inputs.reference_frame_number }}" \
+            --execution-providers cpu \
+            --execution-thread-count 2 \
+            --output-video-encoder libx264 \
+            --output-video-preset veryfast \
+            --output-video-quality 85 \
+            -s ../source.img \
+            -t ../target_chunk.mp4 \
+            -o ../swapped_chunk_${{ steps.idx.outputs.padded }}.mp4
+
+      - name: Upload swapped chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: swapped-${{ steps.idx.outputs.padded }}
+          path: swapped_chunk_${{ steps.idx.outputs.padded }}.mp4
+          retention-days: 1
+
+  merge:
+    name: merge & critique
+    needs: [ prepare, swap ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout pipeline repo
+        uses: actions/checkout@v4
+
+      - name: Download all swapped chunks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: swapped-*
+          merge-multiple: true
+          path: parts/
+
+      - name: Concatenate chunks (stream copy, re-encode fallback)
+        run: |
+          mkdir -p out
+          ls parts/ | sort > list.txt
+          echo "### Parts found" >> "$GITHUB_STEP_SUMMARY"
+          cat list.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          : > concat.txt
+          while read -r f; do echo "file 'parts/$f'" >> concat.txt; done < list.txt
+          if ffmpeg -y -f concat -safe 0 -i concat.txt -c copy out/output.mp4 2>/dev/null; then
+            echo "Concat mode: stream copy" >> "$GITHUB_STEP_SUMMARY"
+          else
+            ffmpeg -y -f concat -safe 0 -i concat.txt \
+              -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p \
+              -c:a aac -b:a 128k out/output.mp4
+            echo "Concat mode: re-encode fallback" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          ffprobe -v error -show_entries format=duration,size -of default=noprint_wrappers=1 out/output.mp4
+
+      - name: Build before/after contact sheet & offline critique
+        run: |
+          curl -L --retry 5 --retry-delay 3 -o target.mp4 "${{ inputs.target_video_url }}"
+          curl -L --retry 5 --retry-delay 3 -o source.img "${{ inputs.source_face_url }}"
+          pip install --quiet pillow numpy opencv-python-headless
+          python scripts/make_contact_sheet.py --before target.mp4 --after out/output.mp4 --out contact_sheet.png --frames 6
+          python scripts/offline_critique.py --before target.mp4 --after out/output.mp4 \
+            --out-md critique_report.md --out-json critique_report.json
+          cat critique_report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload final results
+        uses: actions/upload-artifact@v4
+        with:
+          name: swap-output-parallel
+          path: |
+            out/output.mp4
+            contact_sheet.png
+            critique_report.md
+            critique_report.json
+          retention-days: 90
